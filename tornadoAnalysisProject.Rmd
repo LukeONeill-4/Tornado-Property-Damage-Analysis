@@ -1,0 +1,433 @@
+---
+title: "finalProjectv2"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+Alright the overall goal of the project is to predict the cost of damage caused by any given tornado in the storm event data set. 
+
+
+
+```{r}
+library(knitr)
+library(tinytex)
+library(tidyverse)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(out.width = "60%",fig.align='center')
+```
+
+First lets load the data.
+
+```{r}
+storms_all <- read_csv("tornado_data.csv")
+```
+
+This includes a lot of predictor variables and has the damage listed in thousands, millions or billions of dollars. f_score is also not numerical when it should be so lets fix both of these
+
+```{r}
+ 
+
+
+storms_all2 <- storms_all %>%
+  mutate(
+    damage_clean = str_trim(tolower(damage)),                 # lowercase and trim spaces
+    damage_value = parse_number(damage_clean),                # extract numbers
+    damage_suffix = str_extract(damage_clean, "[kmb]$"),      # get k, m, or b at the end
+    multiplier = case_when(
+      damage_suffix == "k" ~ 1000,
+      damage_suffix == "m" ~ 1000000,
+      damage_suffix == "b" ~ 1000000000,
+      TRUE ~ 1
+    ),
+    damage_num = damage_value * multiplier ,                  # convert all to pure numbers
+      log_damage = log(damage_num + 1),
+     f_score_num = as.numeric(str_extract(f_score, "\\d+")),
+    state = factor(state),
+    f_score_num = as.numeric(str_extract(f_score, "\\d+")),
+    state = factor(state),
+    month = factor(month),
+    state = factor(state),
+    county_name = factor(county_name),
+    f_score = factor(f_score)
+
+    
+  )%>%
+  na.omit()
+
+
+```
+This sets the damage value to a real number, the f_score to a real number and takes the log of the damage to bring the damage values closer together. Now I will split into training and testing and start making models. 
+
+
+```{r}
+set.seed(123)
+
+train_index <- sample(1:nrow(storms_all2), 0.8 * nrow(storms_all2))
+
+training <- storms_all2[train_index, ]
+testing  <- storms_all2[-train_index, ]
+
+
+
+
+null_model <- lm(log_damage ~ 1, data = training)
+
+full_model <- lm(log_damage ~ tor_length + tor_width + injuries_deaths +
+                   f_score_num + range + start_time + end_time + month + state,
+                 data = training)
+library(MASS)
+
+step_model <- stepAIC(null_model,
+                      scope = list(lower = null_model, upper = full_model),
+                      direction = "forward",
+                      trace = TRUE)
+
+
+
+```
+
+Using forward stepwise looking at AIC as the error metric we see that the model using state, f_score, month, tornado width and length has the lowest AIC.
+```{r}
+summary(step_model)
+
+
+```
+R^2 of .375, now lets see the RMSE. Getting errors because some states are not in training set. 
+
+```{r}
+testing_clean <- testing %>%
+  filter(state %in% step_model$xlevels$state) %>%
+  droplevels()
+
+#unique(testing$state)          # all states in test
+#step_model$xlevels$state       # states used in model
+#unique(testing_clean$state)    # should NOT include ALASKA now
+
+
+
+test_pred_log <- predict(step_model, newdata = testing_clean)
+
+test_pred <- exp(test_pred_log) - 1
+
+test_rmse <- sqrt(mean((testing_clean$damage_num - test_pred)^2))
+test_rmse
+
+
+```
+
+
+now to make plots for predictive results section: 
+
+```{r}
+# 1 diagnostic plot
+# Figure 1: Residuals vs Fitted
+plot(step_model, which = 1,
+     main = "Figure 5: Residuals vs Fitted Plot for Final Log-Linear Model")
+
+
+
+
+# 2 variable selection plot
+# Figure 2: AIC Path During Forward Stepwise Selection
+library(MASS)
+
+step_path <- step_model$anova   # AIC trace
+plot(step_path$AIC, type = "b", pch = 19,
+     xlab = "Step",
+     ylab = "AIC",
+     main = "Figure 6: AIC During Forward Stepwise Selection")
+
+
+
+# Figure 3: Distribution of Prediction Errors
+errors <- testing_clean$damage_num - test_pred
+
+hist(errors,
+     breaks = 40,
+     main = "Figure 3: Distribution of Prediction Errors (Original Damage Scale)",
+     xlab = "Error: Actual - Predicted Damage ($)")
+
+
+
+
+
+library(ggplot2)
+
+ggplot(data = testing_clean, aes(x = damage_num, y = test_pred)) +
+  geom_point(alpha = 0.4) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Figure 4: Predicted vs Actual Tornado Damage",
+    x = "Actual Damage ($)",
+    y = "Predicted Damage ($)"
+  )
+
+
+```
+Ok so for the disucssion part 
+
+
+```{r}
+summary(null_model)
+
+
+```
+Anova : 
+
+
+```{r}
+anova(null_model, step_model)
+
+
+
+```
+
+
+cross validated error: 
+
+```{r}
+library(boot)
+
+# cross-validated error for the final model (with state)
+loocv_final <- cv.glm(
+  data   = training,     # IMPORTANT: same data used to fit step_model
+  glmfit = step_model    # your final model with state
+  # no K argument -> default is leave-one-out CV
+)
+
+# RMSE on the log scale
+loocv_final_rmse_log <- sqrt(loocv_final$delta[1])
+loocv_final_rmse_log
+
+
+
+```
+
+
+
+```{r}
+
+
+# Turn off scientific notation
+options(scipen = 999)
+
+# Create impact area
+storms_all2 <- storms_all2 %>%
+  mutate(impact_area = tor_length * tor_width)
+
+# Calculate median line (middle)
+mid_damage <- median(storms_all2$damage_num, na.rm = TRUE)
+
+# Figure 2 Plot
+plot(
+  storms_all2$impact_area,
+  storms_all2$damage_num,
+  pch = 19,
+  col = rgb(0, 0, 1, 0.4),
+  xlab = "Impact Area (Length × Width)",
+  ylab = "Damage Amount ($)",
+  main = "Figure 2: Impact Area vs Tornado Damage"
+)
+
+# Middle reference line (median damage)
+abline(h = mid_damage, col = "red", lwd = 2)
+
+
+
+
+```
+
+
+
+```{r}
+
+model <- lm(log_damage ~ month + state + county_id + county_name +
+tor_length + tor_width + injuries_deaths +
+start_day + end_day + start_time + end_time + range +
+f_score_num,data=storms_all2)
+#execute forward stepwise
+forward_model <- ols_step_forward_adj_r2(model)
+#review selection steps
+forward_model$metrics
+
+
+best_forward_model <- lm(log_damage ~ county_name+f_score_num+state+month+tor_length+tor_width+range+injuries_deaths+start_time+end_time,data=storms_all2)
+summary(best_forward_model)
+anova(best_forward_model)
+
+
+pred_log <- predict(best_forward_model, newdata = storms_all2)
+pred_orig <- exp(pred_log) - 1
+
+rmse_orig <- sqrt(mean((storms_all2$damage_num - pred_orig)^2))
+rmse_orig
+
+
+
+```
+null model stuff
+```{r}
+null_model <- lm(log_damage ~ 1, data = storms_all2)
+summary(null_model)
+
+
+summary(null_model)$r.squared
+
+anova(best_forward_model)
+
+
+```
+
+```{r}
+# plots
+
+
+# Figure 1: Diagnostic Plot (Residuals vs Fitted)
+plot(
+  best_forward_model, 
+  which = 1,
+  main = "Figure 5: Residuals vs Fitted"
+)
+
+
+
+# Figure 2: Forward Stepwise Selection by Adjusted R²
+plot(
+  forward_model$metrics$adj_r2,
+  type = "b",
+  pch = 19,
+  xlab = "Step",
+  ylab = "Adjusted R²",
+  main = "Figure 6: Adjusted R² During Forward Stepwise Selection"
+)
+
+
+
+# Prediction errors
+errors_orig <- storms_all2$damage_num - pred_orig
+
+# Figure 3: Histogram of Prediction Errors
+hist(
+  errors_orig,
+  breaks = 50,
+  col = "skyblue",
+  main = "Figure 7: Distribution of Prediction Errors (Original Scale)",
+  xlab = "Error = Actual Damage - Predicted Damage ($)"
+)
+
+
+
+
+# --- Compute RMSE on the log scale for null vs final model ---
+
+# Final model predictions on log scale
+pred_log <- predict(best_forward_model, newdata = storms_all2)
+
+model_rmse_log <- sqrt(mean((storms_all2$log_damage - pred_log)^2))
+
+# Null model: always predict mean log_damage
+null_pred_log <- mean(storms_all2$log_damage)
+null_rmse_log <- sqrt(mean((storms_all2$log_damage - null_pred_log)^2))
+
+# Put into a small data frame
+rmse_df <- data.frame(
+  Model = c("Null Model", "Final Log-Linear Model"),
+  RMSE  = c(null_rmse_log, model_rmse_log)
+)
+
+# --- Figure 3: RMSE comparison plot ---
+
+barplot(
+  height = rmse_df$RMSE,
+  names.arg = rmse_df$Model,
+  main = "Figure 3: RMSE of Null vs Final Model (Log Scale)",
+  ylab = "RMSE on log(damage + 1)",
+  col = c("grey80", "skyblue"),
+  ylim = c(0, max(rmse_df$RMSE) * 1.1)
+)
+
+
+
+# Turn off scientific notation
+options(scipen = 999)
+
+# Figure 4: Predicted vs Actual Damage
+plot(
+  storms_all2$damage_num,
+  pred_orig,
+  pch = 19,
+  col = rgb(0, 0, 1, 0.3),
+  xlab = "Actual Damage ($)",
+  ylab = "Predicted Damage ($)",
+  main = "Figure 4: Predicted vs Actual Tornado Damage"
+)
+
+# Add reference 45-degree line
+abline(a = 0, b = 1, col = "red", lwd = 2)
+
+
+
+```
+
+
+
+
+cross validation attempt again : nvm
+```{r}
+
+
+str(forward_model)
+
+
+
+
+
+
+vars <- forward_model$metrics$variable
+
+step_formulas <- lapply(seq_along(vars), function(i) {
+  as.formula(
+    paste("log_damage ~", paste(vars[1:i], collapse = " + "))
+  )
+})
+
+rmse_vec <- c()
+
+for (f in step_formulas) {
+  m <- lm(f, data = storms_all2)
+  pred_log <- predict(m, newdata = storms_all2)
+  pred_orig <- exp(pred_log) - 1
+  
+  rmse <- sqrt(mean((storms_all2$damage_num - pred_orig)^2))
+  rmse_vec <- c(rmse_vec, rmse)
+}
+
+plot(
+  rmse_vec,
+  type = "b",
+  pch = 19,
+  col = "firebrick",
+  xlab = "Forward Step",
+  ylab = "RMSE on Original Dollar Scale",
+  main = "Figure 7: RMSE at Each Step of Forward Selection"
+)
+
+text(
+  x = 1:length(rmse_vec),
+  y = rmse_vec,
+  labels = vars,
+  pos = 3,
+  cex = 0.7
+)
+
+
+
+plot(best_forward_model, which = 4, main = "Figure 8: Cook's Distance")
+
+```
